@@ -113,6 +113,39 @@ def admin_menu() -> InlineKeyboardMarkup:
     ])
 
 
+async def blocked_users_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    page_size = 8
+    async with db() as c:
+        cur = await c.execute("SELECT COUNT(*) AS total FROM users WHERE is_blocked=1")
+        total = (await cur.fetchone())["total"]
+        max_page = max(0, (total - 1) // page_size)
+        page = max(0, min(page, max_page))
+        cur = await c.execute(
+            "SELECT user_id,username,first_name,last_name FROM users WHERE is_blocked=1 ORDER BY blocked_at DESC LIMIT ? OFFSET ?",
+            (page_size, page * page_size),
+        )
+        users = await cur.fetchall()
+    rows = []
+    for user in users:
+        name = " ".join(filter(None, (user["first_name"], user["last_name"]))) or user["username"] or str(user["user_id"])
+        name = name[:32]
+        rows.append([InlineKeyboardButton(
+            text=f"{name} · Разблокировать",
+            callback_data=f"unblock_user:{user['user_id']}:{page}",
+        )])
+    if max_page:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"blocked:page:{page - 1}"))
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{max_page + 1}", callback_data="blocked:noop"))
+        if page < max_page:
+            nav.append(InlineKeyboardButton(text="➡️", callback_data=f"blocked:page:{page + 1}"))
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="Закрыть", callback_data="blocked:close")])
+    text = f"Заблокированные пользователи · {total}" if total else "Заблокированных пользователей нет."
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def control_keyboard(sub_id: int, blocked: bool = False, answered: bool = False) -> InlineKeyboardMarkup:
     if blocked:
         rows = [[InlineKeyboardButton(text="Разблокировать пользователя", callback_data=f"unblock:{sub_id}")]]
@@ -376,13 +409,53 @@ async def blocked_list(call: CallbackQuery):
     if not call.from_user or call.from_user.id not in OWNER_IDS:
         await call.answer("Нет доступа", show_alert=True)
         return
-    async with db() as c:
-        cur = await c.execute("SELECT user_id,username,first_name,message_count FROM users WHERE is_blocked=1 ORDER BY blocked_at DESC LIMIT 50")
-        rows = await cur.fetchall()
-    text = "Заблокированных нет." if not rows else "Заблокированные пользователи:\n" + "\n".join(
-        f"{r['first_name'] or 'Без имени'} (@{r['username'] or 'нет'}) — ID {r['user_id']}, сообщений: {r['message_count']}" for r in rows)
-    await call.message.answer(text)
+    text, keyboard = await blocked_users_page()
+    await call.message.edit_text(text, reply_markup=keyboard)
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("blocked:page:"))
+async def blocked_page_callback(call: CallbackQuery):
+    if not call.from_user or call.from_user.id not in OWNER_IDS:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    page = int(call.data.rsplit(":", 1)[1])
+    text, keyboard = await blocked_users_page(page)
+    await call.message.edit_text(text, reply_markup=keyboard)
+    await call.answer()
+
+
+@router.callback_query(F.data == "blocked:noop")
+async def blocked_noop(call: CallbackQuery):
+    await call.answer()
+
+
+@router.callback_query(F.data == "blocked:close")
+async def blocked_close(call: CallbackQuery):
+    if call.from_user and call.from_user.id in OWNER_IDS:
+        await call.message.edit_text("Панель суперпользователя:", reply_markup=admin_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("unblock_user:"))
+async def unblock_from_list(call: CallbackQuery):
+    if not call.from_user or call.from_user.id not in OWNER_IDS:
+        await call.answer("Нет доступа", show_alert=True)
+        return
+    _, user_id_raw, page_raw = call.data.split(":")
+    user_id, page = int(user_id_raw), int(page_raw)
+    async with db() as c:
+        await c.execute("UPDATE users SET is_blocked=0,blocked_at=NULL,blocked_by=NULL WHERE user_id=?", (user_id,))
+        await c.execute("UPDATE submissions SET status='new' WHERE user_id=? AND status='blocked'", (user_id,))
+        await c.commit()
+        cur = await c.execute("SELECT id,status FROM submissions WHERE user_id=?", (user_id,))
+        submissions = await cur.fetchall()
+    for submission in submissions:
+        await update_mod_controls(call.bot, submission["id"], user_id,
+                                  answered=submission["status"] in ("answered", "accepted", "rejected"))
+    text, keyboard = await blocked_users_page(page)
+    await call.message.edit_text(text, reply_markup=keyboard)
+    await call.answer("Разблокирован")
 
 
 @router.message(F.chat.type == "private", F.text.startswith("/unblock"))
