@@ -328,16 +328,19 @@ async def update_mod_controls(bot: Bot, sub_id: int, user_id: int, answered: boo
         try:
             if mid == json.loads(row["mod_message_ids"])[0] and answered and not blocked:
                 async with db() as c:
-                    cur = await c.execute("SELECT reply_type,text_content FROM replies WHERE submission_id=? ORDER BY id DESC LIMIT 1", (sub_id,))
+                    cur = await c.execute("SELECT reply_type,text_content,moderator_id FROM replies WHERE submission_id=? ORDER BY id DESC LIMIT 1", (sub_id,))
                     reply = await cur.fetchone()
                 if reply:
+                    moderator = await bot.get_chat(reply["moderator_id"])
+                    moderator_name = html.escape(moderator.username and f"@{moderator.username}" or moderator.full_name or str(reply["moderator_id"]))
+                    moderator_link = f"https://t.me/{moderator.username}" if moderator.username else f"tg://user?id={reply['moderator_id']}"
                     if reply["reply_type"] == "accepted":
-                        status_text = "\n\n✅ Было принято"
+                        status_text = f"\n\n✅ Одобрено by <a href=\"{moderator_link}\">{moderator_name}</a>"
                     elif reply["reply_type"] == "rejected":
-                        status_text = "\n\n❌ Отклонено"
+                        status_text = f"\n\n❌ Отклонено by <a href=\"{moderator_link}\">{moderator_name}</a>"
                     else:
                         sent_text = html.escape(reply["text_content"] or "")
-                        status_text = f"\n\n✍️ Отправлен свой текст:\n<blockquote>{sent_text}</blockquote>"
+                        status_text = f"\n\n✍️ Отвечено by <a href=\"{moderator_link}\">{moderator_name}</a>:\n<blockquote>{sent_text}</blockquote>"
                     name = html.escape(row["sender_name"] or "Без имени")
                     profile = f"https://t.me/{row['username']}" if row["username"] else f"tg://user?id={row['user_id']}"
                     date = html.escape(row["created_at"].replace("T", " "))
