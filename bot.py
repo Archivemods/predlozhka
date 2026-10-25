@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -401,7 +401,7 @@ async def send_manual_reply(message: Message, state: FSMContext, sub_id: int) ->
     await message.answer("Ответ отправлен.")
 
 
-@router.message(F.text == "/cancel")
+@router.message(F.chat.type == "private", F.text == "/cancel", StateFilter(AdminFlow.setting_text))
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Действие отменено.")
