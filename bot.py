@@ -385,6 +385,35 @@ async def blocked_list(call: CallbackQuery):
     await call.answer()
 
 
+@router.message(F.chat.type == "private", F.text.startswith("/unblock"))
+async def manual_unblock(message: Message):
+    if not message.from_user or message.from_user.id not in OWNER_IDS:
+        await message.answer("Команда доступна только суперпользователям.")
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        await message.answer("Использование: /unblock <telegram_id>")
+        return
+    user_id = int(parts[1])
+    async with db() as c:
+        cur = await c.execute("SELECT is_blocked FROM users WHERE user_id=?", (user_id,))
+        row = await cur.fetchone()
+        if not row:
+            await message.answer("Пользователь не найден в базе.")
+            return
+        await c.execute("UPDATE users SET is_blocked=0,blocked_at=NULL,blocked_by=NULL WHERE user_id=?", (user_id,))
+        await c.execute("UPDATE submissions SET status='new' WHERE user_id=? AND status='blocked'", (user_id,))
+        await c.commit()
+        cur = await c.execute("SELECT id,status FROM submissions WHERE user_id=?", (user_id,))
+        submissions = await cur.fetchall()
+    for submission in submissions:
+        await update_mod_controls(
+            message.bot, submission["id"], user_id,
+            answered=submission["status"] in ("answered", "accepted", "rejected"),
+        )
+    await message.answer(f"Пользователь {user_id} разблокирован.")
+
+
 @router.callback_query(F.data.startswith("manual:"))
 async def manual_callback(call: CallbackQuery, state: FSMContext):
     sub_id = int(call.data.split(":")[1])
