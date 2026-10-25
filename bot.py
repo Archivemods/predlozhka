@@ -313,12 +313,36 @@ async def incoming(message: Message, state: FSMContext):
 
 async def update_mod_controls(bot: Bot, sub_id: int, user_id: int, answered: bool = False, blocked: bool = False) -> None:
     async with db() as c:
-        cur = await c.execute("SELECT mod_message_ids FROM submissions WHERE id=?", (sub_id,))
+        cur = await c.execute("SELECT mod_message_ids,user_id,sender_name,username,created_at,text_content FROM submissions WHERE id=?", (sub_id,))
         row = await cur.fetchone()
     if not row:
         return
     for mid in json.loads(row["mod_message_ids"]):
         try:
+            if mid == json.loads(row["mod_message_ids"])[0] and answered and not blocked:
+                async with db() as c:
+                    cur = await c.execute("SELECT reply_type,text_content FROM replies WHERE submission_id=? ORDER BY id DESC LIMIT 1", (sub_id,))
+                    reply = await cur.fetchone()
+                if reply:
+                    if reply["reply_type"] == "accepted":
+                        status_text = "\n\n✅ Было принято"
+                    elif reply["reply_type"] == "rejected":
+                        status_text = "\n\n❌ Отклонено"
+                    else:
+                        sent_text = html.escape(reply["text_content"] or "")
+                        status_text = f"\n\n✍️ Отправлен свой текст:\n<blockquote>{sent_text}</blockquote>"
+                    name = html.escape(row["sender_name"] or "Без имени")
+                    profile = f"https://t.me/{row['username']}" if row["username"] else f"tg://user?id={row['user_id']}"
+                    date = html.escape(row["created_at"].replace("T", " "))
+                    content = html.escape((row["text_content"] or "медиа / вложение")[:2500])
+                    card_text = (f"👤 <a href=\"{profile}\">{name}</a> · <code>ID {row['user_id']}</code>\n"
+                                 f"🕒 {date}\n💬 Сообщение: {content}{status_text}")
+                    await bot.edit_message_text(
+                        chat_id=MOD_CHAT_ID, message_id=mid,
+                        text=card_text, parse_mode="HTML",
+                        reply_markup=control_keyboard(sub_id, blocked=blocked, answered=answered),
+                    )
+                    continue
             await bot.edit_message_reply_markup(chat_id=MOD_CHAT_ID, message_id=mid, reply_markup=control_keyboard(sub_id, blocked=blocked, answered=answered))
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e).lower():
