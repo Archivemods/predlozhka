@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import html
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -15,7 +16,7 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
+    CallbackQuery, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
 from dotenv import load_dotenv
 
@@ -153,6 +154,7 @@ def media_info(m: Message) -> dict:
 album_buffers: dict[tuple[int, str], list[Message]] = defaultdict(list)
 album_tasks: dict[tuple[int, str], asyncio.Task] = {}
 album_locks: dict[tuple[int, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+pending_manual_replies: dict[tuple[int, int], tuple[int, int]] = {}
 
 
 async def save_submission(messages: list[Message]) -> None:
@@ -186,37 +188,40 @@ async def save_submission(messages: list[Message]) -> None:
         await c.commit()
 
     date = now().replace("T", " ")
-    caption = (f"🎵 Предложка #{sub_id}\n"
-               f"Имя: {user.full_name}\nUsername: @{user.username if user.username else 'нет'}\n"
-               f"Telegram ID: {user.id}\nДата: {date}\n"
-               f"Тип: {content_type}\n"
-               f"Текст: {content[:2500] if content else '—'}")
+    display_name = html.escape(user.full_name or "Без имени")
+    profile_url = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
+    caption = (f"👤 <a href=\"{profile_url}\">{display_name}</a> · <code>ID {user.id}</code>\n"
+               f"🕒 {html.escape(date)}\n"
+               f"💬 Сообщение: {html.escape(content[:2500]) if content else 'медиа / вложение'}")
     copied_ids: list[int] = []
     try:
         if len(messages) > 1:
-            copied = await messages[0].bot.copy_messages(MOD_CHAT_ID, user.id, [m.message_id for m in messages])
+            copied = await messages[0].bot.copy_messages(chat_id=MOD_CHAT_ID, from_chat_id=user.id, message_ids=[m.message_id for m in messages])
             copied_ids = [x.message_id for x in copied]
         else:
-            copied = await messages[0].bot.copy_message(MOD_CHAT_ID, user.id, messages[0].message_id)
+            copied = await messages[0].bot.copy_message(chat_id=MOD_CHAT_ID, from_chat_id=user.id, message_id=messages[0].message_id)
             copied_ids = [copied.message_id]
     except Exception as e:
         log.warning("Cannot copy submission %s as group, falling back: %s", sub_id, e)
         for m in messages:
             try:
-                copied = await m.bot.copy_message(MOD_CHAT_ID, user.id, m.message_id)
+                copied = await m.bot.copy_message(chat_id=MOD_CHAT_ID, from_chat_id=user.id, message_id=m.message_id)
                 copied_ids.append(copied.message_id)
             except Exception:
                 log.exception("Failed to copy message %s", m.message_id)
     try:
-        info = await messages[0].bot.send_message(MOD_CHAT_ID, caption, reply_markup=control_keyboard(sub_id, blocked=blocked))
-        copied_ids.append(info.message_id)
+        info = await messages[0].bot.send_message(
+            chat_id=MOD_CHAT_ID, text=caption, parse_mode="HTML",
+            reply_markup=control_keyboard(sub_id, blocked=blocked),
+        )
+        copied_ids = [info.message_id]
         async with db() as c:
             await c.execute("UPDATE submissions SET mod_message_ids=? WHERE id=?", (json.dumps(copied_ids), sub_id))
             await c.commit()
     except Exception:
         log.exception("Could not post submission #%s to moderation chat %s", sub_id, MOD_CHAT_ID)
     try:
-        await messages[0].answer(await get_setting("ack_text"))
+        await messages[0].answer(await get_setting("ack_text"), reply_to_message_id=messages[0].message_id)
     except Exception:
         log.exception("Could not acknowledge submission #%s to user %s", sub_id, user.id)
 
@@ -261,10 +266,6 @@ async def incoming(message: Message, state: FSMContext):
         await state.clear()
         await message.answer("Текст сохранён.", reply_markup=admin_menu())
         return
-    if user.id in OWNER_IDS and current == AdminFlow.manual_reply.state:
-        data = await state.get_data()
-        await send_manual_reply(message, state, data["submission_id"])
-        return
     if message.media_group_id:
         key = (user.id, message.media_group_id)
         async with album_locks[key]:
@@ -285,7 +286,7 @@ async def update_mod_controls(bot: Bot, sub_id: int, user_id: int, answered: boo
         return
     for mid in json.loads(row["mod_message_ids"]):
         try:
-            await bot.edit_message_reply_markup(MOD_CHAT_ID, mid, reply_markup=control_keyboard(sub_id, blocked=blocked, answered=answered))
+            await bot.edit_message_reply_markup(chat_id=MOD_CHAT_ID, message_id=mid, reply_markup=control_keyboard(sub_id, blocked=blocked, answered=answered))
         except TelegramBadRequest as e:
             if "message is not modified" not in str(e).lower():
                 log.debug("Keyboard update failed: %s", e)
@@ -306,7 +307,14 @@ async def send_response(bot: Bot, sub_id: int, moderator_id: int, kind: str, tex
                         (sub_id, user_id, moderator_id, kind, text, now()))
         await c.execute("UPDATE submissions SET status=? WHERE id=?", ("answered" if kind == "manual" else kind, sub_id))
         await c.commit()
-    await bot.send_message(user_id, text)
+    async with db() as c:
+        cur = await c.execute("SELECT source_message_ids FROM submissions WHERE id=?", (sub_id,))
+        source_row = await cur.fetchone()
+    source_ids = json.loads(source_row["source_message_ids"]) if source_row else []
+    try:
+        await bot.send_message(chat_id=user_id, text=text, reply_to_message_id=source_ids[0] if source_ids else None)
+    except TelegramBadRequest:
+        await bot.send_message(chat_id=user_id, text=text)
     await update_mod_controls(bot, sub_id, user_id, answered=True)
 
 
@@ -324,6 +332,22 @@ async def send_manual_reply(message: Message, state: FSMContext, sub_id: int) ->
 async def cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Действие отменено.")
+
+
+@router.message(F.chat.id == MOD_CHAT_ID, F.reply_to_message)
+async def moderator_chat_reply(message: Message):
+    if not message.from_user or not message.text:
+        return
+    key = (message.chat.id, message.reply_to_message.message_id)
+    pending = pending_manual_replies.get(key)
+    if not pending:
+        return
+    submission_id, moderator_id = pending
+    if message.from_user.id != moderator_id:
+        return
+    await send_response(message.bot, submission_id, moderator_id, "manual", message.text)
+    pending_manual_replies.pop(key, None)
+    await message.reply("Ответ отправлен.")
 
 
 @router.callback_query(F.data.startswith("cfg:"))
@@ -370,9 +394,11 @@ async def manual_callback(call: CallbackQuery, state: FSMContext):
     if not row or row["is_blocked"]:
         await call.answer("Пользователь заблокирован или предложка не найдена", show_alert=True)
         return
-    await state.set_state(AdminFlow.manual_reply)
-    await state.update_data(submission_id=sub_id)
-    await call.message.answer(f"Напишите ответ для пользователя {row['user_id']}. Для отмены /cancel.")
+    prompt = await call.message.answer(
+        f"Напишите ответ пользователю {row['user_id']} ответом на это сообщение:",
+        reply_markup=ForceReply(selective=True),
+    )
+    pending_manual_replies[(prompt.chat.id, prompt.message_id)] = (sub_id, call.from_user.id)
     await call.answer()
 
 
