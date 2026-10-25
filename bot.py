@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -44,11 +45,15 @@ def now() -> str:
         return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def db() -> aiosqlite.Connection:
+@asynccontextmanager
+async def db():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = aiosqlite.connect(DB_PATH)
+    conn = await aiosqlite.connect(DB_PATH)
     conn.row_factory = aiosqlite.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        await conn.close()
 
 
 async def init_db() -> None:
