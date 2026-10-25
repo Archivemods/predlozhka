@@ -81,7 +81,8 @@ async def init_db() -> None:
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_submissions_user ON submissions(user_id);
         """)
-        for key, value in (("ack_text", "Спасибо! Ваша предложка получена."),
+        for key, value in (("welcome_text", "Привет! Отправь сюда трек или любую предложку."),
+                           ("ack_text", "Спасибо! Ваша предложка получена."),
                            ("accept_text", "Ваш трек принят! Спасибо за предложку."),
                            ("reject_text", "К сожалению, этот трек не подойдёт. Спасибо за предложку.")):
             await c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key, value))
@@ -103,6 +104,7 @@ async def set_setting(key: str, value: str) -> None:
 
 def admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Изменить приветствие /start", callback_data="cfg:welcome_text")],
         [InlineKeyboardButton(text="Изменить подтверждение", callback_data="cfg:ack_text")],
         [InlineKeyboardButton(text="Изменить текст принятия", callback_data="cfg:accept_text")],
         [InlineKeyboardButton(text="Изменить текст отказа", callback_data="cfg:reject_text")],
@@ -205,15 +207,18 @@ async def save_submission(messages: list[Message]) -> None:
                 copied_ids.append(copied.message_id)
             except Exception:
                 log.exception("Failed to copy message %s", m.message_id)
-    info = await messages[0].bot.send_message(MOD_CHAT_ID, caption, reply_markup=control_keyboard(sub_id, blocked=blocked))
-    copied_ids.append(info.message_id)
-    async with db() as c:
-        await c.execute("UPDATE submissions SET mod_message_ids=? WHERE id=?", (json.dumps(copied_ids), sub_id))
-        await c.commit()
+    try:
+        info = await messages[0].bot.send_message(MOD_CHAT_ID, caption, reply_markup=control_keyboard(sub_id, blocked=blocked))
+        copied_ids.append(info.message_id)
+        async with db() as c:
+            await c.execute("UPDATE submissions SET mod_message_ids=? WHERE id=?", (json.dumps(copied_ids), sub_id))
+            await c.commit()
+    except Exception:
+        log.exception("Could not post submission #%s to moderation chat %s", sub_id, MOD_CHAT_ID)
     try:
         await messages[0].answer(await get_setting("ack_text"))
-    except TelegramForbiddenError:
-        pass
+    except Exception:
+        log.exception("Could not acknowledge submission #%s to user %s", sub_id, user.id)
 
 
 async def flush_album(key: tuple[int, str]) -> None:
@@ -237,7 +242,7 @@ async def start(message: Message, state: FSMContext):
     if message.from_user and message.from_user.id in OWNER_IDS:
         await message.answer("Панель суперпользователя:", reply_markup=admin_menu())
     else:
-        await message.answer(await get_setting("ack_text"))
+        await message.answer(await get_setting("welcome_text"))
 
 
 @router.message(F.chat.type == "private")
@@ -327,7 +332,15 @@ async def config_callback(call: CallbackQuery, state: FSMContext):
         await call.answer("Нет доступа", show_alert=True)
         return
     key = call.data.split(":", 1)[1]
-    labels = {"ack_text": "подтверждение получения", "accept_text": "текст принятия", "reject_text": "текст отказа"}
+    labels = {
+        "welcome_text": "приветствие после /start",
+        "ack_text": "подтверждение получения предложки",
+        "accept_text": "текст принятия",
+        "reject_text": "текст отказа",
+    }
+    if key not in labels:
+        await call.answer("Неизвестная настройка", show_alert=True)
+        return
     await state.set_state(AdminFlow.setting_text)
     await state.update_data(setting_key=key)
     await call.message.answer(f"Отправьте новый текст: {labels[key]}. Для отмены /cancel.")
@@ -436,6 +449,8 @@ async def main():
         raise RuntimeError("Set MODERATION_CHAT_ID in .env")
     await init_db()
     bot = Bot(TOKEN)
+    me = await bot.get_me()
+    log.info("Started as @%s (id=%s); moderation chat=%s; database=%s", me.username, me.id, MOD_CHAT_ID, DB_PATH)
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
