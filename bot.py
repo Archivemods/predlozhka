@@ -64,6 +64,7 @@ async def init_db() -> None:
         CREATE TABLE IF NOT EXISTS users (
           user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT,
           first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
+          accepted_count INTEGER NOT NULL DEFAULT 0, rejected_count INTEGER NOT NULL DEFAULT 0,
           is_blocked INTEGER NOT NULL DEFAULT 0, blocked_at TEXT, blocked_by INTEGER
         );
         CREATE TABLE IF NOT EXISTS submissions (
@@ -82,6 +83,12 @@ async def init_db() -> None:
         CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_submissions_user ON submissions(user_id);
         """)
+        cur = await c.execute("PRAGMA table_info(users)")
+        user_columns = {row["name"] for row in await cur.fetchall()}
+        if "accepted_count" not in user_columns:
+            await c.execute("ALTER TABLE users ADD COLUMN accepted_count INTEGER NOT NULL DEFAULT 0")
+        if "rejected_count" not in user_columns:
+            await c.execute("ALTER TABLE users ADD COLUMN rejected_count INTEGER NOT NULL DEFAULT 0")
         for key, value in (("welcome_text", "Привет! Отправь сюда трек или любую предложку."),
                            ("ack_text", "Спасибо! Ваша предложка получена."),
                            ("accept_text", "Ваш трек принят! Спасибо за предложку."),
@@ -351,7 +358,7 @@ async def update_mod_controls(bot: Bot, sub_id: int, user_id: int, answered: boo
 
 async def send_response(bot: Bot, sub_id: int, moderator_id: int, kind: str, text: str) -> None:
     async with db() as c:
-        cur = await c.execute("SELECT user_id FROM submissions WHERE id=?", (sub_id,))
+        cur = await c.execute("SELECT user_id,status FROM submissions WHERE id=?", (sub_id,))
         row = await cur.fetchone()
         if not row:
             return
@@ -362,7 +369,13 @@ async def send_response(bot: Bot, sub_id: int, moderator_id: int, kind: str, tex
             return
         await c.execute("INSERT INTO replies(submission_id,user_id,moderator_id,reply_type,text_content,created_at) VALUES(?,?,?,?,?,?)",
                         (sub_id, user_id, moderator_id, kind, text, now()))
-        await c.execute("UPDATE submissions SET status=? WHERE id=?", ("answered" if kind == "manual" else kind, sub_id))
+        old_status = row["status"]
+        new_status = "answered" if kind == "manual" else kind
+        if kind == "accepted" and old_status != "accepted":
+            await c.execute("UPDATE users SET accepted_count=accepted_count+1 WHERE user_id=?", (user_id,))
+        elif kind == "rejected" and old_status != "rejected":
+            await c.execute("UPDATE users SET rejected_count=rejected_count+1 WHERE user_id=?", (user_id,))
+        await c.execute("UPDATE submissions SET status=? WHERE id=?", (new_status, sub_id))
         await c.commit()
     async with db() as c:
         cur = await c.execute("SELECT source_message_ids FROM submissions WHERE id=?", (sub_id,))
