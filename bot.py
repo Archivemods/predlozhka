@@ -44,15 +44,15 @@ def now() -> str:
         return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-async def db() -> aiosqlite.Connection:
+def db() -> aiosqlite.Connection:
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(DB_PATH)
+    conn = aiosqlite.connect(DB_PATH)
     conn.row_factory = aiosqlite.Row
     return conn
 
 
 async def init_db() -> None:
-    async with await db() as c:
+    async with db() as c:
         await c.executescript("""
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS users (
@@ -84,14 +84,14 @@ async def init_db() -> None:
 
 
 async def get_setting(key: str) -> str:
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT value FROM settings WHERE key=?", (key,))
         row = await cur.fetchone()
         return row["value"] if row else ""
 
 
 async def set_setting(key: str, value: str) -> None:
-    async with await db() as c:
+    async with db() as c:
         await c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
         await c.commit()
 
@@ -154,7 +154,7 @@ async def save_submission(messages: list[Message]) -> None:
     user = first.from_user
     if user is None:
         return
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT is_blocked FROM users WHERE user_id=?", (user.id,))
         existing = await cur.fetchone()
         blocked = bool(existing["is_blocked"]) if existing else False
@@ -202,7 +202,7 @@ async def save_submission(messages: list[Message]) -> None:
                 log.exception("Failed to copy message %s", m.message_id)
     info = await messages[0].bot.send_message(MOD_CHAT_ID, caption, reply_markup=control_keyboard(sub_id, blocked=blocked))
     copied_ids.append(info.message_id)
-    async with await db() as c:
+    async with db() as c:
         await c.execute("UPDATE submissions SET mod_message_ids=? WHERE id=?", (json.dumps(copied_ids), sub_id))
         await c.commit()
     try:
@@ -224,7 +224,7 @@ async def flush_album(key: tuple[int, str]) -> None:
 async def start(message: Message, state: FSMContext):
     await state.clear()
     if message.from_user:
-        async with await db() as c:
+        async with db() as c:
             cur = await c.execute("SELECT is_blocked FROM users WHERE user_id=?", (message.from_user.id,))
             row = await cur.fetchone()
         if row and row["is_blocked"] and message.from_user.id not in OWNER_IDS:
@@ -268,7 +268,7 @@ async def incoming(message: Message, state: FSMContext):
 
 
 async def update_mod_controls(bot: Bot, sub_id: int, user_id: int, answered: bool = False, blocked: bool = False) -> None:
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT mod_message_ids FROM submissions WHERE id=?", (sub_id,))
         row = await cur.fetchone()
     if not row:
@@ -282,7 +282,7 @@ async def update_mod_controls(bot: Bot, sub_id: int, user_id: int, answered: boo
 
 
 async def send_response(bot: Bot, sub_id: int, moderator_id: int, kind: str, text: str) -> None:
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT user_id FROM submissions WHERE id=?", (sub_id,))
         row = await cur.fetchone()
         if not row:
@@ -334,7 +334,7 @@ async def blocked_list(call: CallbackQuery):
     if not call.from_user or call.from_user.id not in OWNER_IDS:
         await call.answer("Нет доступа", show_alert=True)
         return
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT user_id,username,first_name,message_count FROM users WHERE is_blocked=1 ORDER BY blocked_at DESC LIMIT 50")
         rows = await cur.fetchall()
     text = "Заблокированных нет." if not rows else "Заблокированные пользователи:\n" + "\n".join(
@@ -346,7 +346,7 @@ async def blocked_list(call: CallbackQuery):
 @router.callback_query(F.data.startswith("manual:"))
 async def manual_callback(call: CallbackQuery, state: FSMContext):
     sub_id = int(call.data.split(":")[1])
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT s.user_id,u.is_blocked FROM submissions s JOIN users u USING(user_id) WHERE s.id=?", (sub_id,))
         row = await cur.fetchone()
     if not row or row["is_blocked"]:
@@ -361,7 +361,7 @@ async def manual_callback(call: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("reopen:"))
 async def reopen_callback(call: CallbackQuery):
     sub_id = int(call.data.split(":")[1])
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT user_id FROM submissions WHERE id=?", (sub_id,))
         row = await cur.fetchone()
         cur = await c.execute("SELECT is_blocked FROM users WHERE user_id=?", (row["user_id"],)) if row else None
@@ -387,7 +387,7 @@ async def decision_callback(call: CallbackQuery):
 @router.callback_query(F.data.startswith("block:"))
 async def block_callback(call: CallbackQuery):
     sub_id = int(call.data.split(":")[1])
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT user_id FROM submissions WHERE id=?", (sub_id,))
         row = await cur.fetchone()
         if not row:
@@ -407,7 +407,7 @@ async def block_callback(call: CallbackQuery):
 @router.callback_query(F.data.startswith("unblock:"))
 async def unblock_callback(call: CallbackQuery):
     sub_id = int(call.data.split(":")[1])
-    async with await db() as c:
+    async with db() as c:
         cur = await c.execute("SELECT user_id FROM submissions WHERE id=?", (sub_id,))
         row = await cur.fetchone()
         if not row:
