@@ -261,7 +261,8 @@ async def save_submission(messages: list[Message]) -> None:
     except Exception:
         log.exception("Could not post submission #%s to moderation chat %s", sub_id, MOD_CHAT_ID)
     try:
-        await messages[0].answer(await get_setting("ack_text"), reply_to_message_id=messages[0].message_id)
+        ack_text = await get_setting("ack_text")
+        await messages[0].answer(ack_text, reply_to_message_id=messages[0].message_id)
     except Exception:
         log.exception("Could not acknowledge submission #%s to user %s", sub_id, user.id)
 
@@ -296,6 +297,11 @@ async def incoming(message: Message, state: FSMContext):
     if not user:
         return
     current = await state.get_state()
+    if message.text and message.text.split(maxsplit=1)[0].split("@")[0] == "/cancel":
+        if user.id in OWNER_IDS and current == AdminFlow.setting_text.state:
+            await state.clear()
+            await message.answer("Действие отменено.")
+        return
     if user.id in OWNER_IDS and current == AdminFlow.setting_text.state:
         text = message.text or message.caption
         if not text:
@@ -417,6 +423,10 @@ async def moderator_chat_reply(message: Message):
         return
     submission_id, moderator_id = pending
     if message.from_user.id != moderator_id:
+        return
+    if message.text.split(maxsplit=1)[0].split("@")[0] == "/cancel":
+        pending_manual_replies.pop(key, None)
+        await message.reply("Ручной ответ отменён.")
         return
     await send_response(message.bot, submission_id, moderator_id, "manual", message.text)
     pending_manual_replies.pop(key, None)
